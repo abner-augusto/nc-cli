@@ -1,0 +1,27 @@
+[project]
+name = "nc-cli"
+version = "3.1.0"
+description = "Small dependency-free Nextcloud WebDAV CLI optimized for agent and automation use."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Abner Augusto Souza" }]
+keywords = ["nextcloud", "webdav", "cli", "automation", "agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/abner-augusto/nc-cli"
+Issues = "https://github.com/abner-augusto/nc-cli/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]

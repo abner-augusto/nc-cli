@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+.env
+.env.*
+!.env.example
+.DS_Store
+*.part
+
+# Local workflow file is intentionally untracked unless pushing with a token that has workflow scope.
+.github/workflows/test.yml
