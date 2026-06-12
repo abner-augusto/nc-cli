@@ -8,5 +8,3 @@ __pycache__/
 .DS_Store
 *.part
 
-# Local workflow file is intentionally untracked unless pushing with a token that has workflow scope.
-.github/workflows/test.yml
