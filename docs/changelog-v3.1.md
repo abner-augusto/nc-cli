@@ -4,6 +4,11 @@ Patch date: 2026-06-09.
 
 ## Fixes and Features
 
+### Command name hardening
+
+The supported executable name is now `nc-cli` only.
+The repository no longer ships an `nc` alias because `nc` commonly resolves to netcat on Unix systems and creates avoidable collisions.
+
 ### Atomic, verified downloads
 
 `nc-cli download` now writes to `<target>.part`, validates curl success and `Content-Length`, then atomically renames with `os.replace()`.
