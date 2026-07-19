@@ -29,8 +29,9 @@ cd nc-cli
 ```
 
 Default command name is `nc-cli`, because `nc` usually means netcat on Unix systems.
+`nc-cli` is the documented and supported command name.
 
-If you intentionally want the short name:
+If you intentionally want the short name as a legacy compatibility alias:
 
 ```bash
 ./install.sh --as-nc

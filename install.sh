@@ -17,8 +17,8 @@ while [[ $# -gt 0 ]]; do
 Usage: ./install.sh [--name nc-cli|NAME] [--as-nc]
 
 Installs the CLI into ~/.local/bin.
-Default command name is `nc-cli` to avoid clobbering netcat's common `nc` binary.
-Use --as-nc only if you intentionally want the command to be named `nc`.
+Default command name is `nc-cli`; that is the documented and supported command name.
+Use --as-nc only if you intentionally want the legacy `nc` alias.
 HELP
       exit 0
       ;;
