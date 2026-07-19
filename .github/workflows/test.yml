@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m py_compile bin/nc
+        run: python -m py_compile bin/nc-cli
       - name: Unit tests
         run: |
           python -m pip install --upgrade pip pytest
