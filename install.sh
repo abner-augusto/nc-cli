@@ -30,6 +30,6 @@ HELP
 done
 
 mkdir -p "$HOME/.local/bin"
-install -m 0755 "$(dirname "$0")/bin/nc" "$HOME/.local/bin/$name"
+install -m 0755 "$(dirname "$0")/bin/nc-cli" "$HOME/.local/bin/$name"
 echo "Installed: $HOME/.local/bin/$name"
 echo 'Make sure ~/.local/bin is in PATH.'

@@ -1,4 +1,4 @@
-# nc CLI — JSON Output Reference (v3.1.0)
+# nc-cli — JSON Output Reference (v3.1.0)
 
 All commands support `--json` and emit the same wrapper:
 
@@ -133,7 +133,7 @@ Use `--overwrite` to replace an existing destination. Without it, HTTP 409/412 r
 
 Safety rules:
 
-- `nc rm /` is refused and cannot be overridden.
+- `nc-cli rm /` is refused and cannot be overridden.
 - Directory deletion requires `--recursive`.
 - Default protected top-level paths (`/HERMES-DROP`, `/Obsidian`, `/_INTEGRARTE.ARQ`) require `--force` in addition to `--recursive`.
 - Override protected paths with comma-separated `NC_PROTECTED_DELETE_PATHS`, e.g. `NC_PROTECTED_DELETE_PATHS="/Backups,/Team Share"`. Empty string disables protected-path checks except for `/`.

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-NC_PATH = ROOT / "bin" / "nc"
+NC_PATH = ROOT / "bin" / "nc-cli"
 
 
 def load_nc(monkeypatch):
@@ -71,13 +71,13 @@ def test_download_size_mismatch_fails_and_removes_partial(monkeypatch, tmp_path,
 
 
 @pytest.mark.parametrize("argv,patched_name", [
-    (["nc", "upload", "local.txt", "/remote.txt", "--json"], "cmd_upload"),
-    (["nc", "download", "/remote.txt", "local.txt", "--json"], "cmd_download"),
-    (["nc", "mkdir", "/dir", "--json"], "cmd_mkdir"),
-    (["nc", "mv", "/a", "/b", "--json"], "cmd_mv"),
-    (["nc", "cp", "/a", "/b", "--json"], "cmd_cp"),
-    (["nc", "rm", "/file", "--json"], "cmd_rm"),
-    (["nc", "share", "/file", "--json"], "cmd_share"),
+    (["nc-cli", "upload", "local.txt", "/remote.txt", "--json"], "cmd_upload"),
+    (["nc-cli", "download", "/remote.txt", "local.txt", "--json"], "cmd_download"),
+    (["nc-cli", "mkdir", "/dir", "--json"], "cmd_mkdir"),
+    (["nc-cli", "mv", "/a", "/b", "--json"], "cmd_mv"),
+    (["nc-cli", "cp", "/a", "/b", "--json"], "cmd_cp"),
+    (["nc-cli", "rm", "/file", "--json"], "cmd_rm"),
+    (["nc-cli", "share", "/file", "--json"], "cmd_share"),
 ])
 def test_main_passes_json_mode_to_mutating_commands(monkeypatch, argv, patched_name):
     nc = load_nc(monkeypatch)
@@ -178,7 +178,7 @@ def test_search_escapes_xml_literal(monkeypatch):
 
 def test_share_password_flag_requires_value(monkeypatch, capsys):
     nc = load_nc(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["nc", "share", "/file", "--pw"])
+    monkeypatch.setattr(sys, "argv", ["nc-cli", "share", "/file", "--pw"])
 
     rc = nc.main()
 
@@ -188,11 +188,11 @@ def test_share_password_flag_requires_value(monkeypatch, capsys):
 
 def test_version_flag_prints_version(monkeypatch, capsys):
     nc = load_nc(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["nc", "--version"])
+    monkeypatch.setattr(sys, "argv", ["nc-cli", "--version"])
 
     rc = nc.main()
 
     assert rc == nc.EXIT_OK
     out = capsys.readouterr().out.strip()
-    assert out.startswith("nc ")
+    assert out.startswith("nc-cli ")
     assert nc.VERSION in out

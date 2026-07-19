@@ -1,4 +1,4 @@
-# `nc` CLI v3.1 Changelog
+# `nc-cli` v3.1 Changelog
 
 Patch date: 2026-06-09.
 
@@ -6,7 +6,7 @@ Patch date: 2026-06-09.
 
 ### Atomic, verified downloads
 
-`nc download` now writes to `<target>.part`, validates curl success and `Content-Length`, then atomically renames with `os.replace()`.
+`nc-cli download` now writes to `<target>.part`, validates curl success and `Content-Length`, then atomically renames with `os.replace()`.
 
 - curl/network failure → partial file removed, exit 6
 - size mismatch → partial file removed, exit 6
@@ -54,15 +54,15 @@ The parser splits on that marker instead of guessing from the final newline. Thi
 
 ### Escaped SEARCH literals
 
-`nc search` escapes XML literals with `html.escape(query, quote=True)` before embedding the query inside the WebDAV SEARCH request body.
+`nc-cli search` escapes XML literals with `html.escape(query, quote=True)` before embedding the query inside the WebDAV SEARCH request body.
 
 ### Safer share password handling
 
-`nc share` now refuses `--pw` without a value. It also supports:
+`nc-cli share` now refuses `--pw` without a value. It also supports:
 
 ```bash
-nc share /path --password-env NC_SHARE_PASSWORD
-printf '%s' "$password" | nc share /path --password-stdin
+nc-cli share /path --password-env NC_SHARE_PASSWORD
+printf '%s' "$password" | nc-cli share /path --password-stdin
 ```
 
 Use these instead of `--pw` for sensitive passwords because argv is visible to local process inspection.
@@ -70,8 +70,8 @@ Use these instead of `--pw` for sensitive passwords because argv is visible to l
 ### Version command
 
 ```bash
-nc --version
-nc version
+nc-cli --version
+nc-cli version
 ```
 
 prints the CLI version.
@@ -96,7 +96,7 @@ Run:
 ```bash
 cd ~/.hermes/skills/devops/nextcloud
 uv run --with pytest pytest -q tests/test_nc_cli.py
-python3 -m py_compile scripts/nc
+python3 -m py_compile bin/nc-cli
 ```
 
 Live WebDAV smoke tests were also run against `/HERMES-DROP/.nc-review-*`, including single upload/download, JSON output validation, safe directory delete refusal, forced recursive cleanup, and forced 1 MB chunked upload with SHA1 compare.

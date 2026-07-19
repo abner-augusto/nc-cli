@@ -39,7 +39,7 @@ If you intentionally want the short name:
 Or run directly:
 
 ```bash
-./bin/nc --version
+./bin/nc-cli --version
 ```
 
 ## Configuration
@@ -172,7 +172,7 @@ Set it to an empty string to disable protected-path checks except for `/`, which
 ## Tests
 
 ```bash
-python -m py_compile bin/nc
+python -m py_compile bin/nc-cli
 python -m pip install pytest
 pytest -q
 ```
