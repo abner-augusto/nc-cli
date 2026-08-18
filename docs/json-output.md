@@ -1,4 +1,4 @@
-# nc-cli — JSON Output Reference (v3.1.0)
+# nc-cli — JSON output reference (v3.1.0)
 
 All commands support `--json` and emit the same wrapper:
 

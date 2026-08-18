@@ -2,7 +2,7 @@
 
 Patch date: 2026-06-09.
 
-## Fixes and Features
+## Fixes and features
 
 ### Command name hardening
 
@@ -81,7 +81,7 @@ nc-cli version
 
 prints the CLI version.
 
-## Tests Added
+## Tests added
 
 `tests/test_nc_cli.py` covers:
 
