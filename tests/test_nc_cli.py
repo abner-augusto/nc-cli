@@ -196,3 +196,113 @@ def test_version_flag_prints_version(monkeypatch, capsys):
     out = capsys.readouterr().out.strip()
     assert out.startswith("nc-cli ")
     assert nc.VERSION in out
+
+
+# ── PROPFIND self-entry filtering ────────────────────────────────────────────
+#
+# The server echoes the requested collection as the first <d:response>, so ls has to
+# drop it. The filter compares the href against the requested path; when those two are
+# in different encodings it silently fails to match, and the directory is listed as its
+# own child.
+
+def multistatus(*hrefs):
+    """Build a PROPFIND multistatus body where every href is a collection."""
+    responses = "".join(
+        "<d:response>"
+        f"<d:href>{href}</d:href>"
+        "<d:propstat><d:prop>"
+        "<d:resourcetype><d:collection/></d:resourcetype>"
+        "<d:getcontentlength>0</d:getcontentlength>"
+        "</d:prop></d:propstat>"
+        "</d:response>"
+        for href in hrefs
+    )
+    return f'<d:multistatus xmlns:d="DAV:">{responses}</d:multistatus>'
+
+
+def ls_json(monkeypatch, capsys, nc, path, body):
+    """Run `ls --json` against a canned PROPFIND body, return the parsed payload."""
+    def fake_curl_with_code(*args, **kwargs):
+        return body, "207", ""
+    monkeypatch.setattr(nc, "curl_with_code", fake_curl_with_code)
+
+    rc = nc.cmd_ls(path, json_mode=True)
+    assert rc == nc.EXIT_OK
+    return json.loads(capsys.readouterr().out)
+
+
+def test_ls_drops_self_entry_when_path_needs_encoding(monkeypatch, capsys):
+    """Empty directory whose path contains spaces must list zero entries.
+
+    Before the fix the self-filter compared an unquoted href against a quoted
+    self_href, never matched, and an EMPTY directory reported itself as one child —
+    enough to send a recursive walker into an infinite loop.
+    """
+    nc = load_nc(monkeypatch)
+    path = "/10 - CENTRO DE CULTUR/0CROQUIS"
+    payload = ls_json(monkeypatch, capsys, nc, path, multistatus(nc.dav_href(path) + "/"))
+
+    assert payload["data"]["items"] == []
+
+
+def test_ls_keeps_real_children_alongside_self_entry(monkeypatch, capsys):
+    nc = load_nc(monkeypatch)
+    path = "/10 - CENTRO DE CULTUR"
+    body = multistatus(
+        nc.dav_href(path) + "/",
+        nc.dav_href(path + "/0CROQUIS") + "/",
+    )
+    payload = ls_json(monkeypatch, capsys, nc, path, body)
+
+    assert [item["name"] for item in payload["data"]["items"]] == ["0CROQUIS"]
+
+
+def test_ls_keeps_child_that_shares_the_parent_name(monkeypatch, capsys):
+    """The path-based filter exists for exactly this case — a same-named child.
+
+    It must survive the filter that drops the parent's own entry.
+    """
+    nc = load_nc(monkeypatch)
+    path = "/Obra Nova"
+    body = multistatus(
+        nc.dav_href(path) + "/",
+        nc.dav_href(f"{path}/Obra Nova") + "/",
+    )
+    payload = ls_json(monkeypatch, capsys, nc, path, body)
+
+    assert [item["name"] for item in payload["data"]["items"]] == ["Obra Nova"]
+    assert payload["data"]["items"][0]["path"] == "/Obra Nova/Obra Nova"
+
+
+def test_ls_self_filter_survives_lowercase_hex_encoding(monkeypatch, capsys):
+    """Nextcloud encodes with lowercase hex (%c3%94), Python's quote() uses uppercase.
+
+    Comparing encoded strings cannot work; decoding both sides makes the case
+    difference irrelevant. This is why the comparison must not be done pre-decode.
+    """
+    nc = load_nc(monkeypatch)
+    path = "/3MAQUETE ELETRÔNICA"
+    server_href = nc.dav_href(path).replace("%C3%94", "%c3%94") + "/"
+    payload = ls_json(monkeypatch, capsys, nc, path, multistatus(server_href))
+
+    assert payload["data"]["items"] == []
+
+
+def test_ls_self_filter_unchanged_for_plain_path(monkeypatch, capsys):
+    """Control: paths needing no encoding behaved correctly before and must still."""
+    nc = load_nc(monkeypatch)
+    path = "/HERMES-DROP"
+    body = multistatus(
+        nc.dav_href(path) + "/",
+        nc.dav_href(path + "/_teste-vazio") + "/",
+    )
+    payload = ls_json(monkeypatch, capsys, nc, path, body)
+
+    assert [item["name"] for item in payload["data"]["items"]] == ["_teste-vazio"]
+
+
+def test_decoded_dav_path_normalises_hex_case(monkeypatch):
+    nc = load_nc(monkeypatch)
+
+    assert nc.decoded_dav_path("/remote.php/dav/files/hermes-agent/%c3%94") == \
+        nc.decoded_dav_path("/remote.php/dav/files/hermes-agent/%C3%94")

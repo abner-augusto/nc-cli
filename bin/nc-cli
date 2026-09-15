@@ -186,6 +186,16 @@ def href_to_user_path(href: str) -> str:
         return decoded[len(DAV_PREFIX):] or "/"
     return decoded
 
+def decoded_dav_path(href: str) -> str:
+    """Decode a DAV href so two hrefs can be compared reliably.
+
+    The server percent-encodes path segments, and it does so with LOWERCASE hex
+    (%c3%94) where Python's quote() emits uppercase (%C3%94). Comparing encoded
+    strings therefore cannot be made reliable. Decode both sides instead: unquote()
+    is case-insensitive on the hex digits, which normalises the difference away.
+    """
+    return urllib.parse.unquote(href).rstrip("/")
+
 def build_url(path: str) -> str:
     """Build full URL from user-facing path."""
     encoded = encode_path(path)
@@ -276,11 +286,16 @@ def parse_entry(block: str, self_href: str = None) -> "dict | None":
     href_m = _RE_HREF.search(block)
     if not href_m:
         return None
-    raw_href = urllib.parse.unquote(href_m.group(1)).rstrip("/")
+    raw_href = decoded_dav_path(href_m.group(1))
 
     # Path-based self-filter (not name-based)
     # Old code compared basenames only — broke when a child had the same name as parent
-    if self_href is not None and raw_href == self_href.rstrip("/"):
+    # Both sides are decoded before comparing: self_href comes from dav_href() which
+    # is URL-encoded, while raw_href is already unquoted. Comparing the two directly
+    # only ever matched paths needing no encoding, so any path with a space or an
+    # accent leaked the directory in as its own child — an empty directory then
+    # reported one entry, and recursive walkers never terminated.
+    if self_href is not None and raw_href == decoded_dav_path(self_href):
         return None
 
     user_path = href_to_user_path(raw_href)
