@@ -205,19 +205,27 @@ def test_version_flag_prints_version(monkeypatch, capsys):
 # in different encodings it silently fails to match, and the directory is listed as its
 # own child.
 
-def multistatus(*hrefs):
-    """Build a PROPFIND multistatus body where every href is a collection."""
-    responses = "".join(
+def _response(href, is_dir=True, size=0):
+    tipo = "<d:collection/>" if is_dir else ""
+    return (
         "<d:response>"
         f"<d:href>{href}</d:href>"
         "<d:propstat><d:prop>"
-        "<d:resourcetype><d:collection/></d:resourcetype>"
-        "<d:getcontentlength>0</d:getcontentlength>"
+        f"<d:resourcetype>{tipo}</d:resourcetype>"
+        f"<d:getcontentlength>{size}</d:getcontentlength>"
         "</d:prop></d:propstat>"
         "</d:response>"
-        for href in hrefs
     )
-    return f'<d:multistatus xmlns:d="DAV:">{responses}</d:multistatus>'
+
+
+def multistatus(*entradas):
+    """Build a PROPFIND multistatus body.
+
+    Each entry is either an href string (a collection) or a tuple
+    ``(href, is_dir, size)`` when the response must describe a file.
+    """
+    blocos = [_response(*e) if isinstance(e, tuple) else _response(e) for e in entradas]
+    return f'<d:multistatus xmlns:d="DAV:">{"".join(blocos)}</d:multistatus>'
 
 
 def ls_json(monkeypatch, capsys, nc, path, body):
@@ -306,3 +314,31 @@ def test_decoded_dav_path_normalises_hex_case(monkeypatch):
 
     assert nc.decoded_dav_path("/remote.php/dav/files/hermes-agent/%c3%94") == \
         nc.decoded_dav_path("/remote.php/dav/files/hermes-agent/%C3%94")
+
+
+def test_ls_on_a_file_returns_that_file(monkeypatch, capsys):
+    """`ls <arquivo>` must show the file, whether or not the path needs encoding.
+
+    The self-filter exists to drop a directory that echoes itself. A file does not
+    echo a second copy — its single response IS the item asked for — so filtering it
+    too made `ls <arquivo>` print nothing, and only for paths that needed encoding,
+    since the filter never matched otherwise.
+    """
+    nc = load_nc(monkeypatch)
+
+    for path in ("/HERMES-DROP/quickstart.md",
+                 "/10 - CENTRO DE CULTUR/5APRES/000_APRES00_0000.pptx"):
+        payload = ls_json(monkeypatch, capsys, nc, path,
+                          multistatus((nc.dav_href(path), False, 45)))
+        itens = payload["data"]["items"]
+        assert [i["type"] for i in itens] == ["file"], path
+        assert itens[0]["name"] == path.rsplit("/", 1)[-1], path
+
+
+def test_ls_still_hides_a_directory_that_echoes_itself(monkeypatch, capsys):
+    """The guard must not weaken the original fix: a self-echoing directory goes."""
+    nc = load_nc(monkeypatch)
+    path = "/10 - CENTRO DE CULTUR/0CROQUIS"
+    payload = ls_json(monkeypatch, capsys, nc, path, multistatus(nc.dav_href(path) + "/"))
+
+    assert payload["data"]["items"] == []

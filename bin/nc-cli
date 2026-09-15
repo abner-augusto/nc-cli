@@ -287,21 +287,26 @@ def parse_entry(block: str, self_href: str = None) -> "dict | None":
     if not href_m:
         return None
     raw_href = decoded_dav_path(href_m.group(1))
+    is_dir = bool(_RE_COLLECTION.search(block))
 
-    # Path-based self-filter (not name-based)
+    # Path-based self-filter (not name-based), applied to COLLECTIONS only.
     # Old code compared basenames only — broke when a child had the same name as parent
-    # Both sides are decoded before comparing: self_href comes from dav_href() which
-    # is URL-encoded, while raw_href is already unquoted. Comparing the two directly
-    # only ever matched paths needing no encoding, so any path with a space or an
-    # accent leaked the directory in as its own child — an empty directory then
-    # reported one entry, and recursive walkers never terminated.
-    if self_href is not None and raw_href == decoded_dav_path(self_href):
+    #
+    # Both sides are compared decoded: self_href comes from dav_href() which is
+    # URL-encoded, while raw_href is already unquoted. Comparing the two directly only
+    # ever matched paths needing no encoding, so any path with a space or an accent
+    # leaked the directory in as its own child — an empty directory then reported one
+    # entry, and recursive walkers never terminated.
+    #
+    # The is_dir guard matters: a directory echoes itself as an extra <d:response> and
+    # must be dropped, but a file does not echo a second copy — its single response IS
+    # the item the caller asked for. Filtering files too made `ls <arquivo>` print
+    # nothing, and made the outcome depend on whether the path needed encoding.
+    if self_href is not None and is_dir and raw_href == decoded_dav_path(self_href):
         return None
 
     user_path = href_to_user_path(raw_href)
     name = raw_href.rsplit("/", 1)[-1] if "/" in raw_href else raw_href
-
-    is_dir = bool(_RE_COLLECTION.search(block))
 
     entry = {
         "name": name,
