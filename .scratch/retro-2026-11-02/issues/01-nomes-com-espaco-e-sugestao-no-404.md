@@ -1,6 +1,6 @@
 # 01 — Nomes com espaço nas pontas visíveis no `ls` e sugestão de nome no 404
 
-Status: ready-for-agent
+Status: done
 Blocked by: —
 
 ## Contexto
@@ -25,5 +25,10 @@ Em 2026-11-02 o arquivo `/HERMES-DROP/ Aracati - Ceará.zip` (o nome começa com
 - [ ] `docs/json-output.md` documenta o campo `suggestions`.
 
 ## Decisions
+
+- `ls` humano usa `json.dumps(name, ensure_ascii=False)` para citar: escapa controles (`\t`) e preserva acentos. Confiança: alta.
+- Sugestão exclui entradas de nome idêntico ao pedido (já existiriam). Confiança: alta.
+- `mv`, `cp` e `share` só emitem erro em stderr (não têm caminho JSON de erro hoje); a sugestão sai lá, e `suggestions` em JSON vale para `ls`, `info`, `download`, `rm`. Tornar o erro deles JSON mudaria comportamento fora do ticket. Confiança: média. Pergunta: `mv/cp/share --json` devem emitir erro em JSON?
+- `suggestions` é campo de topo do objeto, ausente quando vazio (mantém a saída atual sem candidato). Confiança: média.
 
 ## Comments

@@ -16,6 +16,18 @@ All commands support `--json` and emit the same wrapper:
 - `data`: command-specific payload, or null on failure
 - `error`: null on success, human-readable string on failure
 
+On a 404 for a remote path (`ls`, `info`, `download`, `rm`), the error object gains a top-level `suggestions` field: a list of sibling paths in the parent directory whose name matches the requested one after normalisation (Unicode NFC, surrounding whitespace removed, case-insensitive). The field is absent when there is no candidate. The exit code stays `2`. `mv`, `cp` and `share` report errors on stderr only and print the suggestion there.
+
+```json
+{
+  "ok": false,
+  "http_code": "404",
+  "data": null,
+  "error": "File not found: /D/Aracati - Ceará.zip (HTTP 404)",
+  "suggestions": ["/D/ Aracati - Ceará.zip"]
+}
+```
+
 Agent parsing rule: check `.ok` and the process exit code. Do not scrape human stderr.
 
 ## Commands

@@ -86,6 +86,7 @@ import sys
 import subprocess
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 import uuid
 import json
@@ -340,13 +341,16 @@ def parse_propfind_xml(xml: str, self_href: str) -> list:
 
 # ── Output helpers ───────────────────────────────────────────────────────────
 
-def out_json(ok: bool, http_code: str, data=None, error: str = None, exit_code: int = None) -> int:
+def out_json(ok: bool, http_code: str, data=None, error: str = None, exit_code: int = None,
+             suggestions: list = None) -> int:
     """Print agent-oriented JSON and return exit code."""
     if exit_code is None:
         exit_code = EXIT_OK if ok else (
             http_exit_code(http_code) if http_code != "000" else EXIT_NETWORK
         )
     payload = {"ok": ok, "http_code": http_code, "data": data, "error": error}
+    if suggestions:
+        payload["suggestions"] = suggestions
     print(json.dumps(payload, ensure_ascii=False))
     return exit_code
 
@@ -359,6 +363,35 @@ def fail(msg: str, exit_code: int, json_mode: bool = False, http_code: str = "00
     """Return either JSON failure or stderr failure using the same exit code."""
     return out_json(False, http_code, data=data, error=msg, exit_code=exit_code) if json_mode else err(f"ERROR: {msg}", exit_code)
 
+def _match_key(name: str) -> str:
+    return unicodedata.normalize("NFC", name).strip().casefold()
+
+def suggest_paths(path: str) -> list:
+    """List the parent of a missing path; return siblings whose normalised name matches."""
+    parent, _, name = path.rpartition("/")
+    parent = parent or "/"
+    url = build_url(parent)
+    if not url.endswith("/"):
+        url += "/"
+    body, code, stderr = curl_with_code("-X", "PROPFIND", "-H", "Depth: 1", url)
+    if stderr or code != "207":
+        return []
+    wanted = _match_key(name)
+    return [
+        e["path"] for e in parse_propfind_xml(body, dav_href(parent))
+        if e["name"] != name and _match_key(e["name"]) == wanted
+    ]
+
+def not_found(msg: str, path: str, json_mode: bool = False) -> int:
+    """Report a 404 for a remote path, suggesting near-miss siblings when there are any."""
+    suggestions = suggest_paths(path)
+    if json_mode:
+        return out_json(False, "404", error=msg, exit_code=EXIT_NOT_FOUND, suggestions=suggestions)
+    lines = [f"ERROR: {msg}"]
+    if suggestions:
+        lines.append("Did you mean: " + ", ".join(f'"{s}"' for s in suggestions) + " ?")
+    return err("\n".join(lines), EXIT_NOT_FOUND)
+
 def ok_json_or_print(json_mode: bool, http_code: str, data: dict, message: str) -> int:
     if json_mode:
         return out_json(True, http_code, data=data)
@@ -367,6 +400,11 @@ def ok_json_or_print(json_mode: bool, http_code: str, data: dict, message: str) 
 
 def _sort_key(e):
     return (0 if e["type"] == "dir" else 1, e["name"])
+
+def display_name(name: str) -> str:
+    if name != name.strip() or any(unicodedata.category(c) == "Cc" for c in name):
+        return json.dumps(name, ensure_ascii=False)
+    return name
 
 def print_entries(entries: list, json_mode: bool, http_code: str, requested_path: str) -> int:
     """Unified list printer. Returns exit code."""
@@ -377,7 +415,7 @@ def print_entries(entries: list, json_mode: bool, http_code: str, requested_path
         return EXIT_OK
     for e in sorted(entries, key=_sort_key):
         icon = "📁" if e["type"] == "dir" else "📄"
-        print(f"{icon} {e['name']}")
+        print(f"{icon} {display_name(e['name'])}")
     return EXIT_OK
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -400,9 +438,7 @@ def cmd_ls(path="/", json_mode=False, recursive=False):
             else err(f"ERROR: {msg}", EXIT_NETWORK)
 
     if code == "404":
-        msg = f"Directory not found: {path} (HTTP 404)"
-        return out_json(False, code, error=msg, exit_code=EXIT_NOT_FOUND) if json_mode \
-            else err(f"ERROR: {msg}", EXIT_NOT_FOUND)
+        return not_found(f"Directory not found: {path} (HTTP 404)", path, json_mode)
     if code in ("401", "403"):
         msg = f"Authentication failed (HTTP {code}). Check NEXTCLOUD_USER and NEXTCLOUD_APP_PASSWORD."
         return out_json(False, code, error=msg, exit_code=EXIT_AUTH) if json_mode \
@@ -664,7 +700,7 @@ def cmd_download(remote_path, local_path, json_mode=False):
         return fail(f"curl: {h_err}", EXIT_NETWORK, json_mode, "000")
     if h_code != "200":
         if h_code == "404":
-            return fail(f"File not found: {remote_path} (HTTP 404)", EXIT_NOT_FOUND, json_mode, h_code)
+            return not_found(f"File not found: {remote_path} (HTTP 404)", remote_path, json_mode)
         if h_code in ("401", "403"):
             return fail(f"Authentication failed (HTTP {h_code})", EXIT_AUTH, json_mode, h_code)
         return fail(f"Cannot download {remote_path} (HTTP {h_code})", http_exit_code(h_code), json_mode, h_code)
@@ -760,7 +796,7 @@ def cmd_mv(src, dst, overwrite=False, json_mode=False):
             EXIT_CONFLICT,
         )
     if code == "404":
-        return err(f"ERROR: Source not found: {src} (HTTP 404)", EXIT_NOT_FOUND)
+        return not_found(f"Source not found: {src} (HTTP 404)", src)
     if code in ("401", "403"):
         return err(f"ERROR: Authentication failed (HTTP {code})", EXIT_AUTH)
     return err(f"ERROR: mv failed (HTTP {code})", http_exit_code(code))
@@ -790,7 +826,7 @@ def cmd_cp(src, dst, overwrite=False, json_mode=False):
             EXIT_CONFLICT,
         )
     if code == "404":
-        return err(f"ERROR: Source not found: {src} (HTTP 404)", EXIT_NOT_FOUND)
+        return not_found(f"Source not found: {src} (HTTP 404)", src)
     if code in ("401", "403"):
         return err(f"ERROR: Authentication failed (HTTP {code})", EXIT_AUTH)
     return err(f"ERROR: cp failed (HTTP {code})", http_exit_code(code))
@@ -831,7 +867,7 @@ def cmd_rm(path, recursive=False, force=False, json_mode=False):
     if probe_stderr:
         return fail(f"curl: {probe_stderr}", EXIT_NETWORK, json_mode, "000")
     if probe_code == "404":
-        return fail(f"Not found: {path} (HTTP 404)", EXIT_NOT_FOUND, json_mode, probe_code)
+        return not_found(f"Not found: {path} (HTTP 404)", path, json_mode)
     if probe_code in ("401", "403"):
         return fail(f"Authentication failed (HTTP {probe_code})", EXIT_AUTH, json_mode, probe_code)
     if probe_code != "207":
@@ -850,7 +886,7 @@ def cmd_rm(path, recursive=False, force=False, json_mode=False):
     if code in ("204", "200"):
         return ok_json_or_print(json_mode, code, {"operation": "rm", "path": path, "type": rtype}, f"OK — deleted {path}")
     if code == "404":
-        return fail(f"Not found: {path} (HTTP 404)", EXIT_NOT_FOUND, json_mode, code)
+        return not_found(f"Not found: {path} (HTTP 404)", path, json_mode)
     if code in ("401", "403"):
         return fail(f"Authentication failed (HTTP {code})", EXIT_AUTH, json_mode, code)
     return fail(f"rm failed (HTTP {code})", http_exit_code(code), json_mode, code)
@@ -959,9 +995,7 @@ def cmd_info(path, json_mode=False):
 
     # Check HTTP code BEFORE parsing XML (fixes phantom-file bug on 404)
     if code == "404":
-        msg = f"Not found: {path} (HTTP 404)"
-        return out_json(False, code, error=msg, exit_code=EXIT_NOT_FOUND) if json_mode \
-            else err(f"ERROR: {msg}", EXIT_NOT_FOUND)
+        return not_found(f"Not found: {path} (HTTP 404)", path, json_mode)
     if code in ("401", "403"):
         return out_json(False, code, error=f"Authentication failed (HTTP {code})", exit_code=EXIT_AUTH) if json_mode \
             else err(f"ERROR: Authentication failed (HTTP {code})", EXIT_AUTH)
@@ -1086,7 +1120,7 @@ def cmd_share(path, password=None, json_mode=False):
     if code in ("401", "403"):
         return err(f"ERROR: Authentication failed (HTTP {code})", EXIT_AUTH)
     if code == "404":
-        return err(f"ERROR: Path not found: {path} (HTTP 404)", EXIT_NOT_FOUND)
+        return not_found(f"Path not found: {path} (HTTP 404)", path)
     return err(f"ERROR: Share failed (HTTP {code}). Response: {body[:300]}", http_exit_code(code))
 
 

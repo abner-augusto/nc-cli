@@ -342,3 +342,150 @@ def test_ls_still_hides_a_directory_that_echoes_itself(monkeypatch, capsys):
     payload = ls_json(monkeypatch, capsys, nc, path, multistatus(nc.dav_href(path) + "/"))
 
     assert payload["data"]["items"] == []
+
+
+# ── Names with edge whitespace and 404 suggestions ───────────────────────────
+
+SPACED = " Aracati - Ceará.zip"
+
+
+def fake_server(monkeypatch, nc, directory, names):
+    """Serve one directory listing; every other request answers 404."""
+    listing = multistatus(
+        nc.dav_href(directory) + "/",
+        *[(nc.dav_href(f"{directory}/{n}"), False, 1) for n in names],
+    )
+    listing_url = nc.build_url(directory).rstrip("/") + "/"
+
+    def fake_curl_with_code(*args, **kwargs):
+        if "PROPFIND" in args and args[-1] == listing_url:
+            return listing, "207", ""
+        return "", "404", ""
+
+    monkeypatch.setattr(nc, "curl_with_code", fake_curl_with_code)
+
+
+def test_ls_human_quotes_names_with_edge_whitespace_only(monkeypatch, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", [SPACED, "Aracati.zip"])
+
+    assert nc.cmd_ls("/D") == nc.EXIT_OK
+
+    lines = capsys.readouterr().out.splitlines()
+    assert f'📄 "{SPACED}"' in lines
+    assert "📄 Aracati.zip" in lines
+
+
+def test_ls_human_quotes_names_with_control_characters(monkeypatch, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", ["a\tb.txt"])
+
+    nc.cmd_ls("/D")
+
+    assert '📄 "a\\tb.txt"' in capsys.readouterr().out.splitlines()
+
+
+def test_ls_json_keeps_exact_names(monkeypatch, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", [SPACED, "Aracati.zip"])
+
+    nc.cmd_ls("/D", json_mode=True)
+
+    items = json.loads(capsys.readouterr().out)["data"]["items"]
+    assert [i["name"] for i in items] == [SPACED, "Aracati.zip"]
+
+
+def test_download_404_suggests_name_with_edge_space(monkeypatch, tmp_path, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", [SPACED])
+
+    rc = nc.cmd_download("/D/Aracati - Ceará.zip", str(tmp_path / "out"))
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "File not found: /D/Aracati - Ceará.zip (HTTP 404)" in err
+    assert f'"/D/{SPACED}"' in err
+
+
+def test_download_404_json_carries_suggestions(monkeypatch, tmp_path, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", [SPACED])
+
+    rc = nc.cmd_download("/D/Aracati - Ceará.zip", str(tmp_path / "out"), json_mode=True)
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["suggestions"] == [f"/D/{SPACED}"]
+
+
+def test_suggestion_matches_nfd_request_against_nfc_server_name(monkeypatch, tmp_path, capsys):
+    import unicodedata
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", [SPACED])
+    requested = unicodedata.normalize("NFD", "/D/Aracati - Ceará.zip")
+
+    nc.cmd_download(requested, str(tmp_path / "out"), json_mode=True)
+
+    assert json.loads(capsys.readouterr().out)["suggestions"] == [f"/D/{SPACED}"]
+
+
+def test_suggestion_ignores_case(monkeypatch, tmp_path, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", ["ARACATI.ZIP"])
+
+    nc.cmd_download("/D/aracati.zip", str(tmp_path / "out"), json_mode=True)
+
+    assert json.loads(capsys.readouterr().out)["suggestions"] == ["/D/ARACATI.ZIP"]
+
+
+def test_404_without_candidate_keeps_current_output(monkeypatch, tmp_path, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", ["other.zip"])
+
+    rc = nc.cmd_download("/D/Aracati.zip", str(tmp_path / "out"))
+    human = capsys.readouterr()
+    rc_json = nc.cmd_download("/D/Aracati.zip", str(tmp_path / "out"), json_mode=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == rc_json == 2
+    assert human.err == "ERROR: File not found: /D/Aracati.zip (HTTP 404)\n"
+    assert payload == {"ok": False, "http_code": "404", "data": None,
+                       "error": "File not found: /D/Aracati.zip (HTTP 404)"}
+
+
+def test_404_with_missing_parent_keeps_current_output(monkeypatch, capsys):
+    nc = load_nc(monkeypatch)
+    monkeypatch.setattr(nc, "curl_with_code", lambda *a, **kw: ("", "404", ""))
+
+    rc = nc.cmd_info("/nowhere/x.zip")
+
+    assert rc == 2
+    assert capsys.readouterr().err == "ERROR: Not found: /nowhere/x.zip (HTTP 404)\n"
+
+
+@pytest.mark.parametrize("call", [
+    lambda nc, p: nc.cmd_info(p),
+    lambda nc, p: nc.cmd_rm(p),
+    lambda nc, p: nc.cmd_mv(p, "/D/new.zip"),
+    lambda nc, p: nc.cmd_cp(p, "/D/new.zip"),
+    lambda nc, p: nc.cmd_share(p),
+])
+def test_other_path_commands_suggest_on_404(monkeypatch, capsys, call):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", [SPACED])
+
+    rc = call(nc, "/D/Aracati - Ceará.zip")
+
+    assert rc == 2
+    assert f'"/D/{SPACED}"' in capsys.readouterr().err
+
+
+def test_ls_404_suggests_sibling_directory(monkeypatch, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/", [" Pasta"])
+
+    rc = nc.cmd_ls("/Pasta", json_mode=True)
+
+    assert rc == 2
+    assert json.loads(capsys.readouterr().out)["suggestions"] == ["/ Pasta"]
