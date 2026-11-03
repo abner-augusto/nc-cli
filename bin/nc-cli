@@ -191,6 +191,9 @@ def href_to_user_path(href: str) -> str:
         return decoded[len(DAV_PREFIX):] or "/"
     return decoded
 
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
 def decoded_dav_path(href: str) -> str:
     """Decode a DAV href so two hrefs can be compared reliably.
 
@@ -307,7 +310,7 @@ def parse_entry(block: str, self_href: str = None) -> "dict | None":
     # must be dropped, but a file does not echo a second copy — its single response IS
     # the item the caller asked for. Filtering files too made `ls <arquivo>` print
     # nothing, and made the outcome depend on whether the path needed encoding.
-    if self_href is not None and is_dir and raw_href == decoded_dav_path(self_href):
+    if self_href is not None and is_dir and _nfc(raw_href) == _nfc(decoded_dav_path(self_href)):
         return None
 
     user_path = href_to_user_path(raw_href)
@@ -368,7 +371,11 @@ def fail(msg: str, exit_code: int, json_mode: bool = False, http_code: str = "00
     return out_json(False, http_code, data=data, error=msg, exit_code=exit_code) if json_mode else err(f"ERROR: {msg}", exit_code)
 
 def _match_key(name: str) -> str:
-    return unicodedata.normalize("NFC", name).strip().casefold()
+    return _nfc(name).strip().casefold()
+
+SUGGESTION_PROPFIND_BODY = (
+    '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>'
+)
 
 def suggest_paths(path: str) -> list:
     """List the parent of a missing path; return siblings whose normalised name matches."""
@@ -377,7 +384,10 @@ def suggest_paths(path: str) -> list:
     url = build_url(parent)
     if not url.endswith("/"):
         url += "/"
-    body, code, stderr = curl_with_code("-X", "PROPFIND", "-H", "Depth: 1", url)
+    body, code, stderr = curl_with_code(
+        "-X", "PROPFIND", "-H", "Depth: 1", "-d", SUGGESTION_PROPFIND_BODY, url,
+        max_time=15, retries=0,
+    )
     if stderr or code != "207":
         return []
     wanted = _match_key(name)
@@ -393,7 +403,7 @@ def not_found(msg: str, path: str, json_mode: bool = False) -> int:
         return out_json(False, "404", error=msg, exit_code=EXIT_NOT_FOUND, suggestions=suggestions)
     lines = [f"ERROR: {msg}"]
     if suggestions:
-        lines.append("Did you mean: " + ", ".join(f'"{s}"' for s in suggestions) + " ?")
+        lines.append("Did you mean: " + ", ".join(json.dumps(s, ensure_ascii=False) for s in suggestions) + " ?")
     return err("\n".join(lines), EXIT_NOT_FOUND)
 
 def ok_json_or_print(json_mode: bool, http_code: str, data: dict, message: str) -> int:
@@ -406,7 +416,7 @@ def _sort_key(e):
     return (0 if e["type"] == "dir" else 1, e["name"])
 
 def display_name(name: str) -> str:
-    if name != name.strip() or any(unicodedata.category(c) == "Cc" for c in name):
+    if name != name.strip() or any(unicodedata.category(c) in ("Cc", "Cf") for c in name):
         return json.dumps(name, ensure_ascii=False)
     return name
 
@@ -480,7 +490,7 @@ def _upload_timeout(nbytes: int) -> int:
     """Generous curl timeout for a transfer: assume >= 2 MB/s, floor 120s."""
     return max(120, int(nbytes / (2 * 1024 * 1024)) + 120)
 
-def _curl_put(file_path, url, extra_headers, max_time, show_progress, retries=None):
+def _curl_put(file_path, url, extra_headers, max_time, show_progress, retries=None, header_file=None):
     """PUT a single file with curl. Returns (http_code, stderr).
 
     When show_progress is set, curl's progress bar streams to the inherited
@@ -492,6 +502,8 @@ def _curl_put(file_path, url, extra_headers, max_time, show_progress, retries=No
            "--connect-timeout", "10", "--max-time", str(max_time), "-K", "-"]
     for h in extra_headers:
         cmd += ["-H", h]
+    if header_file:
+        cmd += ["-D", header_file]
     cmd += ["-T", file_path, "-o", "/dev/null", "-w", f"\n{HTTP_CODE_MARKER}%{{http_code}}", url]
 
     attempt = 0
@@ -763,7 +775,10 @@ def _get_with_etag(url: str) -> tuple[bytes, "str | None", str, str]:
     """GET a remote file. Returns (body, etag, http_code, stderr); body is raw bytes."""
     with tempfile.TemporaryDirectory() as tmp:
         body_path, header_path = os.path.join(tmp, "body"), os.path.join(tmp, "headers")
-        r = curl("-o", body_path, "-D", header_path, "-w", f"\n{HTTP_CODE_MARKER}%{{http_code}}", url, max_time=120)
+        try:
+            r = curl("-o", body_path, "-D", header_path, "-w", f"\n{HTTP_CODE_MARKER}%{{http_code}}", url, max_time=120)
+        except subprocess.TimeoutExpired:
+            return b"", None, "000", "curl timed out"
         if r.returncode != 0:
             return b"", None, "000", (r.stderr or "").strip()
         _, code = _split_curl_body_code(r.stdout or "")
@@ -775,17 +790,28 @@ def _get_with_etag(url: str) -> tuple[bytes, "str | None", str, str]:
             etag = _etag_header(f.read())
         return body, etag, code, ""
 
-def _put_bytes(url: str, content: bytes, precondition: str) -> tuple[str, str]:
+def _put_bytes(url: str, content: bytes, precondition: str) -> tuple[str, str, "str | None"]:
+    """Single conditional PUT, never retried: a retry after a lost response would hit our own write."""
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "content")
+        path, header_path = os.path.join(tmp, "content"), os.path.join(tmp, "headers")
         with open(path, "wb") as f:
             f.write(content)
-        return _curl_put(path, url, [precondition], _upload_timeout(len(content)), False)
+        code, stderr = _curl_put(
+            path, url, [precondition], _upload_timeout(len(content)), False,
+            retries=0, header_file=header_path,
+        )
+        etag = None
+        if os.path.exists(header_path):
+            with open(header_path, "r", errors="replace") as f:
+                etag = _etag_header(f.read())
+        return code, stderr, etag
 
-def _remote_size(url: str) -> "int | None":
+def _remote_head(url: str) -> tuple["int | None", "str | None"]:
     head, code, _ = curl_with_code("-I", url, max_time=30)
+    if code != "200":
+        return None, None
     m = re.search(r"content-length:\s*(\d+)", head, re.IGNORECASE)
-    return int(m.group(1)) if code == "200" and m else None
+    return (int(m.group(1)) if m else None), _etag_header(head)
 
 def cmd_append(remote_path, local_path, create=False, json_mode=False):
     if local_path == "-":
@@ -797,6 +823,12 @@ def cmd_append(remote_path, local_path, create=False, json_mode=False):
             new = f.read()
 
     remote_path = _normalise(remote_path)
+    if not new:
+        return ok_json_or_print(
+            json_mode, "000",
+            {"path": remote_path, "bytes_appended": 0, "size": None, "attempts": 0},
+            f"Nothing to append to {remote_path}",
+        )
     url = build_url(remote_path)
 
     for attempt in range(1, APPEND_MAX_ATTEMPTS + 1):
@@ -818,24 +850,38 @@ def cmd_append(remote_path, local_path, create=False, json_mode=False):
 
         separator = b"\n" if old and not old.endswith(b"\n") else b""
         combined = old + separator + new
-        put_code, put_err = _put_bytes(url, combined, precondition)
+        put_code, put_err, put_etag = _put_bytes(url, combined, precondition)
         if put_code == "412":
             continue
+        if put_code == "409":
+            return not_found(f"Parent folder of {remote_path} does not exist (HTTP 409)", remote_path, json_mode)
+        if put_code == "000" or put_code.startswith("5"):
+            exit_code = EXIT_NETWORK if put_code == "000" else EXIT_SERVER
+            detail = f"curl: {put_err}" if put_code == "000" else f"HTTP {put_code}"
+            return fail(
+                f"Append to {remote_path} got no confirmation ({detail}); the remote state is uncertain, "
+                f"check with info/download before repeating",
+                exit_code, json_mode, put_code,
+            )
         if put_code not in ("200", "201", "204"):
-            if put_code == "000":
-                return fail(f"curl: {put_err}", EXIT_NETWORK, json_mode, "000")
             return fail(f"Append failed (HTTP {put_code})", http_exit_code(put_code), json_mode, put_code)
 
-        size = _remote_size(url)
-        if size != len(combined):
+        size, head_etag = _remote_head(url)
+        concurrent_after = bool(put_etag and head_etag and put_etag != head_etag)
+        if not concurrent_after and size != len(combined):
+            have = "unknown" if size is None else f"{size:,} bytes"
             return fail(
-                f"Size mismatch after append — expected {len(combined):,} bytes, remote has {size if size is None else format(size, ',')}",
+                f"Size mismatch after append — expected {len(combined):,} bytes, remote has {have}",
                 EXIT_CHECKSUM, json_mode, put_code,
             )
+        data = {"path": remote_path, "bytes_appended": len(separator + new), "size": size, "attempts": attempt}
+        if concurrent_after:
+            data["concurrent_after"] = True
+        shown = "unknown size" if size is None else f"{size:,} bytes"
         return ok_json_or_print(
-            json_mode, put_code,
-            {"path": remote_path, "bytes_appended": len(separator + new), "size": size, "attempts": attempt},
-            f"OK — appended {len(separator + new):,} bytes to {remote_path} ({size:,} bytes, {attempt} attempt(s))",
+            json_mode, put_code, data,
+            f"OK — appended {len(separator + new):,} bytes to {remote_path} ({shown}, {attempt} attempt(s)"
+            + (", another writer appended afterwards)" if concurrent_after else ")"),
         )
 
     return fail(

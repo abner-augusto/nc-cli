@@ -36,4 +36,9 @@ Logs como `/0-VIABILIDADES BRASIL URBANO/_TRIAGEM/_log-triagem-hermes.md` são a
 - Leitura de volta por HEAD (`Content-Length`). Confiança alta.
 - 412 com `--create` (alguém criou antes) também refaz o GET. Sem ETag no GET: exit 5. Confiança média.
 
+- Revisão: o PUT do append não tem retry interno (`retries=0`); 000 ou 5xx sai com 6 ou 5 e aviso de estado remoto incerto, para não duplicar a escrita. Confiança alta.
+- Releitura: ETag do PUT diferente do ETag do HEAD significa escrita concorrente posterior; o 2xx condicional confirma a nossa, sucesso com `data.concurrent_after: true`. Sem ETag no PUT, vale a comparação de tamanho. Decisão tomada pelo orquestrador. Confiança média.
+- Entrada vazia: no-op sem requisição (exit 0, `bytes_appended: 0`, `size: null`, `attempts: 0`); não checa se o remoto existe. Confiança média.
+- PUT 409 (pai ausente) sai com 2 e mensagem de pasta-pai ausente. Confiança média.
+
 ## Comments

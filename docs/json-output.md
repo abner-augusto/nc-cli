@@ -119,6 +119,8 @@ Single PUT uploads omit `chunks` and set `chunked: false`.
 }
 ```
 
+`concurrent_after: true` appears when another writer changed the file between our PUT and the read-back; our write is confirmed by the conditional 2xx and `size` is then the newer size. The no-lost-write guarantee depends on the server honouring `If-Match` / `If-None-Match`. Empty input is a no-op (`bytes_appended: 0`, `size: null`, `attempts: 0`, no request).
+
 `bytes_appended` includes the `\n` separator when one was inserted. `size` is the remote size read back after the PUT. `attempts` counts GET+PUT rounds (max 3). Exit `4` when every attempt got HTTP 412, `2` when the file is missing and `--create` is absent, `9` when the read-back size differs.
 
 ### `download <remote> <local> --json`

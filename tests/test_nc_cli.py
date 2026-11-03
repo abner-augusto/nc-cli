@@ -494,11 +494,16 @@ def test_ls_404_suggests_sibling_directory(monkeypatch, capsys):
 class FakeDav:
     """In-memory single-file WebDAV server behind the curl/_curl_put seams."""
 
-    def __init__(self, nc, monkeypatch, content=None, conflicts=(), lie_about_size=False):
+    def __init__(self, nc, monkeypatch, content=None, conflicts=(), lie_about_size=False,
+                 put_response=None, write_after_put=None, hide_head_length=False, put_parent_missing=False):
         self.content = content
         self.version = 1
         self.conflicts = list(conflicts)
         self.lie_about_size = lie_about_size
+        self.put_response = put_response
+        self.write_after_put = write_after_put
+        self.hide_head_length = hide_head_length
+        self.put_parent_missing = put_parent_missing
         self.put_headers = []
         self.puts_accepted = 0
         monkeypatch.setattr(nc, "curl", self.curl)
@@ -513,11 +518,17 @@ class FakeDav:
         return CurlResult(0, "\n" + self.marker + "200")
 
     def head(self, *args, **kwargs):
+        if self.content is None:
+            return "", "404", ""
         size = len(self.content) + (1 if self.lie_about_size else 0)
-        return f"Content-Length: {size}\n", "200", ""
+        length = "" if self.hide_head_length else f"Content-Length: {size}\n"
+        return f'{length}ETag: "v{self.version}"\n', "200", ""
 
-    def put(self, file_path, url, extra_headers, max_time, show_progress, retries=None):
+    def put(self, file_path, url, extra_headers, max_time, show_progress, retries=None, header_file=None):
         self.put_headers.append(extra_headers[0])
+        self.put_retries = retries
+        if self.put_parent_missing:
+            return "409", ""
         if self.conflicts:
             self.content = self.conflicts.pop(0)
             self.version += 1
@@ -530,7 +541,12 @@ class FakeDav:
         self.content = Path(file_path).read_bytes()
         self.version += 1
         self.puts_accepted += 1
-        return "204", ""
+        if header_file:
+            Path(header_file).write_text(f'HTTP/1.1 204 No Content\r\nETag: "v{self.version}"\r\n\r\n')
+        if self.write_after_put:
+            self.content += self.write_after_put
+            self.version += 1
+        return self.put_response or "204", ""
 
 
 def append_setup(monkeypatch, tmp_path, **kwargs):
@@ -624,3 +640,121 @@ def test_help_lists_append(monkeypatch, capsys):
     nc = load_nc(monkeypatch)
     nc.cmd_help()
     assert "append" in capsys.readouterr().out
+
+
+def test_append_does_not_retry_put_and_never_duplicates_on_lost_response(monkeypatch, tmp_path, capsys):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n", put_response="502")
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_SERVER
+    assert dav.content == b"old\nnew\n"
+    assert dav.put_retries == 0
+    assert len(dav.put_headers) == 1
+    assert "uncertain" in capsys.readouterr().err
+
+
+def test_append_put_network_failure_exits_network_with_uncertain_state(monkeypatch, tmp_path, capsys):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n", put_response="000")
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_NETWORK
+    assert "uncertain" in capsys.readouterr().err
+
+
+def test_append_succeeds_when_another_agent_appends_after_our_put(monkeypatch, tmp_path, capsys):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n", write_after_put=b"theirs\n")
+    assert nc.cmd_append("/log.md", local, json_mode=True) == nc.EXIT_OK
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["concurrent_after"] is True
+    assert data["size"] == len(b"old\nnew\ntheirs\n")
+
+
+def test_append_size_mismatch_message_when_content_length_missing(monkeypatch, tmp_path, capsys):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n", hide_head_length=True)
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_CHECKSUM
+    err = capsys.readouterr().err
+    assert "None" not in err and "unknown" in err
+
+
+def test_append_create_race_retries_with_if_match_and_keeps_both_writes(monkeypatch, tmp_path, capsys):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=None)
+    original_put = dav.put
+
+    def racing_put(file_path, url, extra_headers, *a, **kw):
+        if dav.content is None:
+            dav.content = b"theirs\n"
+            dav.version += 1
+            dav.put_headers.append(extra_headers[0])
+            return "412", ""
+        return original_put(file_path, url, extra_headers, *a, **kw)
+
+    monkeypatch.setattr(nc, "_curl_put", racing_put)
+    assert nc.cmd_append("/log.md", local, create=True, json_mode=True) == nc.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["data"]["attempts"] == 2
+    assert dav.put_headers[0] == "If-None-Match: *"
+    assert dav.put_headers[1].startswith("If-Match:")
+    assert dav.content == b"theirs\nnew\n"
+
+
+def test_append_empty_input_is_noop(monkeypatch, tmp_path, capsys):
+    nc, dav, _ = append_setup(monkeypatch, tmp_path, content=b"old\n")
+    empty = tmp_path / "empty.txt"
+    empty.write_bytes(b"")
+    assert nc.cmd_append("/log.md", str(empty), json_mode=True) == nc.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["data"]["bytes_appended"] == 0
+    assert dav.put_headers == []
+
+
+def test_append_get_timeout_exits_network(monkeypatch, tmp_path):
+    import subprocess
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n")
+
+    def timing_out(*a, **kw):
+        raise subprocess.TimeoutExpired("curl", 1)
+
+    monkeypatch.setattr(nc, "curl", timing_out)
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_NETWORK
+
+
+def test_append_create_with_missing_parent_exits_not_found(monkeypatch, tmp_path, capsys):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=None, put_parent_missing=True)
+    monkeypatch.setattr(nc, "suggest_paths", lambda path: [])
+    assert nc.cmd_append("/nope/log.md", local, create=True) == nc.EXIT_NOT_FOUND
+    assert "Parent folder" in capsys.readouterr().err
+
+
+def test_suggestion_parent_in_nfd_does_not_list_parent_as_child(monkeypatch, tmp_path, capsys):
+    import unicodedata
+    nc = load_nc(monkeypatch)
+    parent_nfc = "/Relatório"
+    parent_nfd = unicodedata.normalize("NFD", parent_nfc)
+    server_parent_href = nc.dav_href(parent_nfc).replace("%C3%B3", "%c3%b3") + "/"
+    listing = multistatus(server_parent_href, (nc.dav_href(parent_nfc + "/a.zip"), False, 1))
+    monkeypatch.setattr(nc, "curl_with_code", lambda *a, **kw: (listing, "207", ""))
+
+    assert nc.suggest_paths(parent_nfd + "/A.ZIP") == [parent_nfc + "/a.zip"]
+    assert nc.suggest_paths(parent_nfd + "/Relatório") == []
+
+
+def test_suggestion_on_stderr_is_escaped(monkeypatch, tmp_path, capsys):
+    nc = load_nc(monkeypatch)
+    fake_server(monkeypatch, nc, "/D", ['A "x" $HOME `id`.zip'])
+
+    nc.cmd_download("/D/a \"x\" $home `id`.zip", str(tmp_path / "out"))
+
+    assert '"/D/A \\"x\\" $HOME `id`.zip"' in capsys.readouterr().err
+
+
+def test_suggestion_propfind_is_short_lived_and_minimal(monkeypatch):
+    nc = load_nc(monkeypatch)
+    seen = {}
+
+    def fake(*args, **kwargs):
+        seen["args"], seen["kwargs"] = args, kwargs
+        return "", "207", ""
+
+    monkeypatch.setattr(nc, "curl_with_code", fake)
+    nc.suggest_paths("/D/x")
+    assert seen["kwargs"] == {"max_time": 15, "retries": 0}
+    assert "<d:resourcetype/>" in seen["args"][seen["args"].index("-d") + 1]
+
+
+def test_display_name_quotes_format_characters(monkeypatch):
+    nc = load_nc(monkeypatch)
+    assert nc.display_name("a\u202eb.txt") == json.dumps("a\u202eb.txt", ensure_ascii=False)
