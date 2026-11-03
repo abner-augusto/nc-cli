@@ -1,0 +1,9 @@
+[check]
+command = "uv run --with pytest pytest -q"
+
+[tracker]
+kind = "local"
+
+[autonomy]
+merge = "main"
+push = false
