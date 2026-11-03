@@ -489,3 +489,138 @@ def test_ls_404_suggests_sibling_directory(monkeypatch, capsys):
 
     assert rc == 2
     assert json.loads(capsys.readouterr().out)["suggestions"] == ["/ Pasta"]
+
+
+class FakeDav:
+    """In-memory single-file WebDAV server behind the curl/_curl_put seams."""
+
+    def __init__(self, nc, monkeypatch, content=None, conflicts=(), lie_about_size=False):
+        self.content = content
+        self.version = 1
+        self.conflicts = list(conflicts)
+        self.lie_about_size = lie_about_size
+        self.put_headers = []
+        self.puts_accepted = 0
+        monkeypatch.setattr(nc, "curl", self.curl)
+        monkeypatch.setattr(nc, "curl_with_code", self.head)
+        monkeypatch.setattr(nc, "_curl_put", self.put)
+
+    def curl(self, *args, **kwargs):
+        if self.content is None:
+            return CurlResult(0, "\n" + self.marker + "404")
+        Path(args[args.index("-o") + 1]).write_bytes(self.content)
+        Path(args[args.index("-D") + 1]).write_text(f'HTTP/1.1 200 OK\r\nETag: "v{self.version}"\r\n\r\n')
+        return CurlResult(0, "\n" + self.marker + "200")
+
+    def head(self, *args, **kwargs):
+        size = len(self.content) + (1 if self.lie_about_size else 0)
+        return f"Content-Length: {size}\n", "200", ""
+
+    def put(self, file_path, url, extra_headers, max_time, show_progress, retries=None):
+        self.put_headers.append(extra_headers[0])
+        if self.conflicts:
+            self.content = self.conflicts.pop(0)
+            self.version += 1
+            return "412", ""
+        expected = extra_headers[0]
+        if expected == "If-None-Match: *":
+            assert self.content is None
+        else:
+            assert expected == f'If-Match: "v{self.version}"'
+        self.content = Path(file_path).read_bytes()
+        self.version += 1
+        self.puts_accepted += 1
+        return "204", ""
+
+
+def append_setup(monkeypatch, tmp_path, **kwargs):
+    nc = load_nc(monkeypatch)
+    FakeDav.marker = nc.HTTP_CODE_MARKER
+    dav = FakeDav(nc, monkeypatch, **kwargs)
+    local = tmp_path / "new.txt"
+    local.write_bytes(b"new\n")
+    return nc, dav, str(local)
+
+
+def test_append_to_file_ending_in_newline_adds_no_extra_line(monkeypatch, tmp_path):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n")
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_OK
+    assert dav.content == b"old\nnew\n"
+
+
+def test_append_to_file_without_final_newline_inserts_exactly_one(monkeypatch, tmp_path):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old")
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_OK
+    assert dav.content == b"old\nnew\n"
+
+
+def test_append_preserves_crlf_bytes(monkeypatch, tmp_path):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"a\r\n")
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_OK
+    assert dav.content == b"a\r\nnew\n"
+
+
+def test_append_retries_after_412_and_keeps_concurrent_write(monkeypatch, tmp_path, capsys):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n", conflicts=[b"old\nother\n"])
+    assert nc.cmd_append("/log.md", local, json_mode=True) == nc.EXIT_OK
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data == {"path": "/log.md", "bytes_appended": 4, "size": 14, "attempts": 2}
+    assert dav.content == b"old\nother\nnew\n"
+
+
+def test_append_gives_up_with_conflict_after_three_412s(monkeypatch, tmp_path):
+    nc, dav, local = append_setup(
+        monkeypatch, tmp_path, content=b"old\n", conflicts=[b"a\n", b"b\n", b"c\n"]
+    )
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_CONFLICT
+    assert len(dav.put_headers) == 3
+    assert dav.puts_accepted == 0
+    assert dav.content == b"c\n"
+
+
+def test_append_missing_remote_without_create_exits_not_found(monkeypatch, tmp_path):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=None)
+    monkeypatch.setattr(nc, "suggest_paths", lambda path: [])
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_NOT_FOUND
+    assert dav.put_headers == []
+
+
+def test_append_create_uses_if_none_match(monkeypatch, tmp_path):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=None)
+    assert nc.cmd_append("/log.md", local, create=True) == nc.EXIT_OK
+    assert dav.put_headers == ["If-None-Match: *"]
+    assert dav.content == b"new\n"
+
+
+def test_append_size_mismatch_on_read_back_exits_checksum(monkeypatch, tmp_path):
+    nc, dav, local = append_setup(monkeypatch, tmp_path, content=b"old\n", lie_about_size=True)
+    assert nc.cmd_append("/log.md", local) == nc.EXIT_CHECKSUM
+
+
+def test_append_dash_reads_stdin(monkeypatch, tmp_path):
+    import io
+
+    nc, dav, _ = append_setup(monkeypatch, tmp_path, content=b"old\n")
+
+    class Stdin:
+        buffer = io.BytesIO(b"from stdin\n")
+
+    monkeypatch.setattr(sys, "stdin", Stdin)
+    assert nc.cmd_append("/log.md", "-") == nc.EXIT_OK
+    assert dav.content == b"old\nfrom stdin\n"
+
+
+def test_main_routes_append_with_create_flag(monkeypatch):
+    nc = load_nc(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(sys, "argv", ["nc-cli", "append", "/r.md", "-", "--create", "--json"])
+    monkeypatch.setattr(nc, "cmd_append", lambda *a, **kw: seen.update(args=a, kw=kw) or nc.EXIT_OK)
+    assert nc.main() == nc.EXIT_OK
+    assert seen["args"] == ("/r.md", "-")
+    assert seen["kw"] == {"create": True, "json_mode": True}
+
+
+def test_help_lists_append(monkeypatch, capsys):
+    nc = load_nc(monkeypatch)
+    nc.cmd_help()
+    assert "append" in capsys.readouterr().out

@@ -66,6 +66,13 @@ nc-cli info /Backups/backup.zip --json
 nc-cli share /Backups/backup.zip
 ```
 
+Append to a shared append-only log without losing concurrent writes (GET + ETag, PUT with `If-Match`, up to 3 attempts, exit 4 on conflict; `-` reads stdin; `--create` creates a missing file):
+
+```bash
+nc-cli append /Logs/agents.md ./line.md
+echo "- done" | nc-cli append /Logs/agents.md - --create
+```
+
 Large uploads are chunked automatically when they exceed the chunk size, default 100 MB:
 
 ```bash
@@ -79,6 +86,7 @@ nc-cli upload ./huge.tar.zst /Backups/huge.tar.zst --no-chunk
 ```text
 ls       [path] [--json] [--recursive]
 upload   <local> <remote> [--json] [--no-chunk] [--chunk-size MB] [--no-clobber]
+append   <remote> <local|-> [--json] [--create]
 download <remote> <local> [--json]
 mkdir    <path> [--json]
 mv       <src> <dst> [--json] [--overwrite]

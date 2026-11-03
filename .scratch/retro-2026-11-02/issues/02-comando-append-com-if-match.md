@@ -1,6 +1,6 @@
 # 02 — Comando `append` atômico para logs append-only
 
-Status: ready-for-agent
+Status: done
 Blocked by: 01 (mesmo arquivo; implementar depois do merge do 01)
 
 ## Contexto
@@ -30,5 +30,10 @@ Logs como `/0-VIABILIDADES BRASIL URBANO/_TRIAGEM/_log-triagem-hermes.md` são a
 - [ ] Testes em `tests/test_nc_cli.py`; `uv run --with pytest pytest -q` verde.
 
 ## Decisions
+
+- GET grava corpo e cabeçalhos em arquivos temporários (bytes exatos, sem tradução de CRLF); ETag usado literalmente em `If-Match`. Confiança alta.
+- `bytes_appended` inclui o `\n` separador inserido. Confiança média.
+- Leitura de volta por HEAD (`Content-Length`). Confiança alta.
+- 412 com `--create` (alguém criou antes) também refaz o GET. Sem ETag no GET: exit 5. Confiança média.
 
 ## Comments

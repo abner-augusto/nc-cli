@@ -103,6 +103,24 @@ Permission flags: `G` read, `W` write, `D` delete, `N` rename, `V` move, `C` cre
 
 Single PUT uploads omit `chunks` and set `chunked: false`.
 
+### `append <remote> <local|-> --json`
+
+```json
+{
+  "ok": true,
+  "http_code": "204",
+  "data": {
+    "path": "/Logs/agents.md",
+    "bytes_appended": 42,
+    "size": 1042,
+    "attempts": 1
+  },
+  "error": null
+}
+```
+
+`bytes_appended` includes the `\n` separator when one was inserted. `size` is the remote size read back after the PUT. `attempts` counts GET+PUT rounds (max 3). Exit `4` when every attempt got HTTP 412, `2` when the file is missing and `--create` is absent, `9` when the read-back size differs.
+
 ### `download <remote> <local> --json`
 
 ```json

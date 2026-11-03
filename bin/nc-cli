@@ -28,6 +28,7 @@ EXIT CODES — branch on these, they are the contract
 COMMANDS
   ls       [path] [--json] [--recursive]            List a directory
   upload   <local> <remote> [opts]                  Upload a file (auto-chunks large files)
+  append   <remote> <local|-> [--create]            Append atomically (If-Match, 3 tries, exit 4 on conflict)
   download <remote> <local>                         Download a file (verifies size)
   mkdir    <path>                                   Create a directory (idempotent)
   mv       <src> <dst> [--overwrite]                Move / rename
@@ -39,6 +40,9 @@ COMMANDS
   share    <path> [--pw PASS|--password-env VAR|--password-stdin] Create a public share link
   version                                           Show version
   help                                              Show this guide
+
+  append options:
+    --create           create the remote file (If-None-Match: *) when it does not exist
 
   upload options:
     --no-chunk         force a single PUT instead of chunked upload
@@ -749,6 +753,96 @@ def cmd_download(remote_path, local_path, json_mode=False):
         f"OK — {actual_size:,} bytes → {local_path}",
     )
 
+APPEND_MAX_ATTEMPTS = 3
+
+def _etag_header(headers: str) -> "str | None":
+    m = re.search(r"^etag:[ \t]*(.+?)\s*$", headers, re.IGNORECASE | re.MULTILINE)
+    return m.group(1) if m else None
+
+def _get_with_etag(url: str) -> tuple[bytes, "str | None", str, str]:
+    """GET a remote file. Returns (body, etag, http_code, stderr); body is raw bytes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        body_path, header_path = os.path.join(tmp, "body"), os.path.join(tmp, "headers")
+        r = curl("-o", body_path, "-D", header_path, "-w", f"\n{HTTP_CODE_MARKER}%{{http_code}}", url, max_time=120)
+        if r.returncode != 0:
+            return b"", None, "000", (r.stderr or "").strip()
+        _, code = _split_curl_body_code(r.stdout or "")
+        if code != "200":
+            return b"", None, code, ""
+        with open(body_path, "rb") as f:
+            body = f.read()
+        with open(header_path, "r", errors="replace") as f:
+            etag = _etag_header(f.read())
+        return body, etag, code, ""
+
+def _put_bytes(url: str, content: bytes, precondition: str) -> tuple[str, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "content")
+        with open(path, "wb") as f:
+            f.write(content)
+        return _curl_put(path, url, [precondition], _upload_timeout(len(content)), False)
+
+def _remote_size(url: str) -> "int | None":
+    head, code, _ = curl_with_code("-I", url, max_time=30)
+    m = re.search(r"content-length:\s*(\d+)", head, re.IGNORECASE)
+    return int(m.group(1)) if code == "200" and m else None
+
+def cmd_append(remote_path, local_path, create=False, json_mode=False):
+    if local_path == "-":
+        new = sys.stdin.buffer.read()
+    elif not os.path.isfile(local_path):
+        return fail(f"File not found: {local_path}", EXIT_USAGE, json_mode)
+    else:
+        with open(local_path, "rb") as f:
+            new = f.read()
+
+    remote_path = _normalise(remote_path)
+    url = build_url(remote_path)
+
+    for attempt in range(1, APPEND_MAX_ATTEMPTS + 1):
+        old, etag, code, stderr = _get_with_etag(url)
+        if code == "404":
+            if not create:
+                return not_found(f"File not found: {remote_path} (HTTP 404); use --create to create it", remote_path, json_mode)
+            old, precondition = b"", "If-None-Match: *"
+        elif code == "000":
+            return fail(f"curl: {stderr}" if stderr else "Network error", EXIT_NETWORK, json_mode, "000")
+        elif code in ("401", "403"):
+            return fail(f"Authentication failed (HTTP {code})", EXIT_AUTH, json_mode, code)
+        elif code != "200":
+            return fail(f"Cannot read {remote_path} (HTTP {code})", http_exit_code(code), json_mode, code)
+        elif not etag:
+            return fail(f"Server returned no ETag for {remote_path}; cannot append safely", EXIT_SERVER, json_mode, code)
+        else:
+            precondition = f"If-Match: {etag}"
+
+        separator = b"\n" if old and not old.endswith(b"\n") else b""
+        combined = old + separator + new
+        put_code, put_err = _put_bytes(url, combined, precondition)
+        if put_code == "412":
+            continue
+        if put_code not in ("200", "201", "204"):
+            if put_code == "000":
+                return fail(f"curl: {put_err}", EXIT_NETWORK, json_mode, "000")
+            return fail(f"Append failed (HTTP {put_code})", http_exit_code(put_code), json_mode, put_code)
+
+        size = _remote_size(url)
+        if size != len(combined):
+            return fail(
+                f"Size mismatch after append — expected {len(combined):,} bytes, remote has {size if size is None else format(size, ',')}",
+                EXIT_CHECKSUM, json_mode, put_code,
+            )
+        return ok_json_or_print(
+            json_mode, put_code,
+            {"path": remote_path, "bytes_appended": len(separator + new), "size": size, "attempts": attempt},
+            f"OK — appended {len(separator + new):,} bytes to {remote_path} ({size:,} bytes, {attempt} attempt(s))",
+        )
+
+    return fail(
+        f"Append conflict: {remote_path} changed on all {APPEND_MAX_ATTEMPTS} attempts (HTTP 412); nothing written",
+        EXIT_CONFLICT, json_mode, "412",
+    )
+
 def cmd_mkdir(path, json_mode=False):
     path = _normalise(path)
     url = build_url(path)
@@ -1199,7 +1293,7 @@ def cmd_help():
 # Flags that are consumed globally (not passed to commands as positional args).
 # A bare '--' stops flag parsing — everything after is positional.
 KNOWN_GLOBAL_FLAGS = frozenset({"--json", "--recursive", "--no-retry", "--password-stdin"})
-COMMAND_FLAGS = frozenset({"--overwrite", "--no-chunk", "--no-clobber", "--force"})  # boolean, command-specific
+COMMAND_FLAGS = frozenset({"--overwrite", "--no-chunk", "--no-clobber", "--force", "--create"})  # boolean, command-specific
 VALUE_FLAGS = frozenset({"--chunk-size", "--pw", "--password-env"})  # consume the following token as a value
 
 def parse_args(argv):
@@ -1296,6 +1390,12 @@ def main():
             json_mode=json_mode,
         )
 
+    elif cmd == "append":
+        if len(args) < 2:
+            sys.stderr.write(usage("append <remote> <local|-> [--create]") + "\n")
+            return EXIT_USAGE
+        return cmd_append(args[0], args[1], create="--create" in cflags, json_mode=json_mode)
+
     elif cmd == "download":
         if len(args) < 2:
             sys.stderr.write(usage("download <remote> <local>") + "\n")
@@ -1366,7 +1466,7 @@ def main():
 
     else:
         sys.stderr.write(f"Unknown command: {cmd}\n")
-        sys.stderr.write("Commands: ls, upload, download, mkdir, mv, cp, rm, search, info, quota, share, help\n")
+        sys.stderr.write("Commands: ls, upload, append, download, mkdir, mv, cp, rm, search, info, quota, share, help\n")
         sys.stderr.write("Run 'nc-cli help' for the full guide.\n")
         return EXIT_USAGE
 
